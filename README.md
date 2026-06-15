@@ -21,6 +21,7 @@ Personal Claude Code skills, slash commands, and hooks I author and use across m
 | [`rum-review`](skills/rum-review) | Query Datadog RUM data, synthesize findings into categorized issues |
 | [`screenshot-pr`](skills/screenshot-pr) | Capture one signature screenshot from the deploy preview, embed in PR description |
 | [`slack-gif-creator`](skills/slack-gif-creator) | Build animated GIFs optimized for Slack |
+| [`weekly-slack-updates`](skills/weekly-slack-updates) | Generate + post the weekly "Dev Weekly" Slack changelog from cross-repo git history |
 
 Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`, `references/`, `assets/`.
 
