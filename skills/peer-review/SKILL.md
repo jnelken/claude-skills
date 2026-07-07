@@ -1,6 +1,6 @@
 ---
 name: peer-review
-description: Use when the user wants a Codex code review run locally against the current branch (or uncommitted changes) and the mechanical findings applied as edits, before pushing — so the GitHub Codex bot has less to flag on the PR. Trigger phrases include "peer review", "run codex on this", "self-review before I push", "codex my changes", "do a local review first".
+description: Use when the user wants a Codex code review run locally against the current branch (or uncommitted changes) and the mechanical findings applied as edits, before pushing — so the GitHub Codex bot has less to flag on the PR. Trigger phrases include "peer review", "run codex on this", "self-review before I push", "codex my changes", "do a local review first", "keep reviewing until clean", "cycle codex locally".
 ---
 
 # Peer Review
@@ -18,10 +18,12 @@ Single pass:
 /peer-review
 ```
 
-Iterative until clean (recommended for non-trivial diffs):
+Iterative until clean (recommended for non-trivial diffs) — **this is how you cycle** through multiple review→fix→review rounds; step 7 owns the loop-continue decision and the anti-loop ceiling:
 ```
 /loop /peer-review
 ```
+
+For the *PR* side (after pushing, driving Codex on GitHub instead of locally), see [[cycle-review-pr]].
 
 The user may pass an optional scope hint, e.g. `/peer-review uncommitted` or `/peer-review base=develop`. Honor it; otherwise auto-detect (see step 1).
 
