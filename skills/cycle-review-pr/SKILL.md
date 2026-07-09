@@ -13,6 +13,8 @@ The trigger-driven sibling of [[babysit-pr]]. `babysit-pr` assumes an automated 
 
 **The "resolved" state on a review thread is GraphQL-only.** `gh pr view`, REST `/pulls/{n}/comments`, and the GitHub web search all hide it. Every thread read and write below uses `gh api graphql`. If you find yourself in `gh pr view` output, you're in the wrong API.
 
+**A clean *initial* review can be completely silent.** At least for a PR's first automatic review, some Codex configurations signal "reviewed, no findings" purely by reacting with 👍 on the PR description — no review object, no comment. Step 2 folds this into `LAST_CODEX_AT` so it isn't mistaken for "Codex hasn't answered yet." Whether a *re-triggered* review (this skill's main loop) repeats the reaction or posts a comment instead isn't confirmed — treat the reaction as one more detection surface, not the only one, and watch for the pending-review timeout misfiring if repeat clean passes turn out not to move the timestamp.
+
 **The trigger string.** This skill posts `@codex review` — OpenAI Codex's GitHub command (`@codex` is the app, `review` is the command; a space, **not** a hyphen — GitHub parses `@codex-review` as a nonexistent *user* mention and fires nothing). It's defined once as `TRIGGER` in step 1 and referenced everywhere (the jq filters read it via `env.TRIGGER`). If your Codex app listens for a different mention, change **only that one line** — do not hardcode a string anywhere else.
 
 ## How to invoke
@@ -42,7 +44,7 @@ gh pr view --json number,url,headRefName,baseRefName,headRepositoryOwner,headRep
          owner:.headRepositoryOwner.login, repo:.headRepository.name}'
 ```
 
-If `head` is `main`/`master`, abort. Cache `{owner, repo, num}` for the rest of the iteration. Set `LAST_PUSH_AT=$(git log -1 --format=%cI HEAD)`.
+If `head` is `main`/`master`, abort. Cache `{owner, repo, num}` for the rest of the iteration. Set `LAST_PUSH_AT=$(TZ=UTC0 git log -1 --date=iso-strict-local --format=%cd HEAD)` — UTC (`Z`-suffixed), matching every GitHub API timestamp; git's default `%cI` emits your local offset instead, which silently breaks lexical comparisons against API data.
 
 **Define the trigger string once, here, and reference it everywhere via `env.TRIGGER`** (gojq — which `gh --jq` uses — reads exported env vars). This is the single source of truth; change only this line to match your Codex app's mention:
 
@@ -52,23 +54,27 @@ export TRIGGER="@codex review"   # OpenAI Codex's GitHub command (space, not a h
 
 ### 2. Determine review state — trigger, wait, or process?
 
-This step decides which of three paths the iteration takes. Compute two timestamps:
+This step decides which of three paths the iteration takes. Compute these timestamps:
 
 ```bash
 # When we last requested a review (our own top-level comment containing the trigger)
 LAST_REQUEST_AT=$(gh api repos/$OWNER/$REPO/issues/$NUM/comments \
   --jq '[.[] | select(.body | contains(env.TRIGGER)) | .created_at] | max // ""')
 
-# When Codex last did anything: a review submission OR a bot relay comment
+# When Codex last did anything: a review submission, a bot relay comment, or a clean-review reaction
 LAST_CODEX_REVIEW_AT=$(gh api repos/$OWNER/$REPO/pulls/$NUM/reviews \
   --jq '[.[] | select(.user.login | test("codex|chatgpt|github-actions"; "i")) | .submitted_at] | max // ""')
 LAST_CODEX_COMMENT_AT=$(gh api repos/$OWNER/$REPO/issues/$NUM/comments \
   --jq '[.[] | select(.user.type=="Bot" and (.body | contains(env.TRIGGER) | not)) | .created_at] | max // ""')
+LAST_CODEX_REACTION_AT=$(gh api repos/$OWNER/$REPO/issues/$NUM/reactions \
+  --jq '[.[] | select(.content=="+1" and (.user.login | test("codex|chatgpt"; "i"))) | .created_at] | max // ""')
 ```
 
-The `test("codex|chatgpt|github-actions"; "i")` match is deliberately broad because Codex may submit as its own login *or* be relayed by `github-actions[bot]`. If your repo has **other** bots that submit PR reviews (e.g. a separate CI linter), that broad match will false-positive — one of them submitting will look like "Codex answered," routing you to Process → find nothing → wrongly declare clean. Narrow the regex to your actual Codex login if so.
+The `test("codex|chatgpt|github-actions"; "i")` match is deliberately broad because Codex may submit as its own login *or* be relayed by `github-actions[bot]`. If your repo has **other** bots that submit PR reviews (e.g. a separate CI linter), that broad match will false-positive — one of them submitting will look like "Codex answered," routing you to Process → find nothing → wrongly declare clean. Narrow the regex to your actual Codex login if so. The reaction check uses the narrower `codex|chatgpt` (no `github-actions`) since the observed pattern is the bot reacting directly — but other bots react too (e.g. `datadog-official[bot]` commonly +1's the same PR for unrelated reasons), so confirm your repo's actual reviewer login if you widen it.
 
-`LAST_CODEX_AT` = the max of the two Codex timestamps (empty if Codex has never reviewed). Then branch — **check the empty cases first**, since an empty timestamp string sorts before any real one and would otherwise mis-route:
+**The reaction timestamp matters most for a clean pass.** When Codex finds nothing, some configurations never create a review object or comment — only a 👍 on the PR description. Without `LAST_CODEX_REACTION_AT`, that clean pass is indistinguishable from Codex never having run, and you'd misroute to Wait until the pending-review timeout fires, or Trigger a redundant re-review.
+
+`LAST_CODEX_AT` = the max of the three Codex timestamps (empty if Codex has never reviewed or reacted). Then branch — **check the empty cases first**, since an empty timestamp string sorts before any real one and would otherwise mis-route:
 
 | Situation | Path |
 |---|---|
@@ -222,7 +228,7 @@ mutation($id:ID!){
 
 ```bash
 gh api repos/$OWNER/$REPO/issues/$NUM/comments -f body="$TRIGGER"   # $TRIGGER from step 1
-LAST_REQUEST_AT=$(git log -1 --format=%cI HEAD)  # or capture the comment's created_at
+LAST_REQUEST_AT=$(TZ=UTC0 git log -1 --date=iso-strict-local --format=%cd HEAD)  # UTC; or capture the comment's created_at directly
 ```
 
 This is also the path taken on a **fresh start** (step 2 "Trigger" case): no findings to address, no request yet → post `$TRIGGER` to kick off the first review, then wait.
@@ -285,7 +291,7 @@ Keep replies to one or two sentences. Replies are only posted when no code fix w
 - **Same-thread retry cap.** If the same `thread.id` shows up unresolved across three consecutive iterations after you've replied, stop touching it and surface to the user.
 - **Reviewer ping-pong.** If a fix generates a *new* comment on the *same line*, address it once. A third comment on that line → stop and escalate.
 - **Hard ceiling.** Eight trigger→process cycles without convergence → exit and report. Each cycle spends a real Codex review; don't burn them indefinitely.
-- **Pending-review timeout.** If a requested review hasn't landed after ~6 poll ticks (~12 min), the trigger may have failed (wrong mention string, Codex app not installed on the repo). Stop and tell the user to check the trigger mention (`$TRIGGER`) and app config.
+- **Pending-review timeout.** If a requested review hasn't landed after ~6 poll ticks (~12 min), the trigger may have failed (wrong mention string, Codex app not installed on the repo) — **or** a clean pass landed as a reaction that isn't feeding `LAST_CODEX_AT` (verify step 2 actually queries `/issues/$NUM/reactions`). Stop and tell the user to check the trigger mention (`$TRIGGER`) and app config.
 
 ## Common mistakes
 
@@ -296,6 +302,7 @@ Keep replies to one or two sentences. Replies are only posted when no code fix w
 - **Treating "no code changes" as "re-trigger anyway"** — reply-only/skipped iterations produce nothing new to review; exit instead of triggering.
 - **Trusting `line` on outdated threads** — the line number is stale; read the current file before deciding whether the concern still applies.
 - **Treating a review with no inline threads as automatically clean** — Codex often posts P1/P2 findings only in the review *body* or as a top-level bot comment. Check all three surfaces (step 3) before declaring convergence.
+- **Ignoring reactions when computing `LAST_CODEX_AT`** — at least for an initial review, a clean pass may only show up as a 👍 on the PR description, with no review object, thread, or comment. Miss that in step 2 and a completed clean pass looks like "Codex hasn't answered yet," burning poll ticks until the pending-review timeout fires.
 - **Wrong trigger string** — if Codex never answers, your mention may not match the app's configured trigger (`@codex review` with a space, **not** `@codex-review` with a hyphen, which GitHub treats as a nonexistent user mention). Fix `TRIGGER` in step 1; don't loop forever waiting.
 - **Using this when auto-review is ON** — you'd double-review and waste runs; use [[babysit-pr]] instead.
 - **Amending or force-pushing** — review threads anchor to commits; rewriting breaks them.
