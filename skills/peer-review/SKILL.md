@@ -36,6 +36,32 @@ The user may pass an optional scope hint, e.g. `/peer-review uncommitted` or `/p
 
 ## One iteration
 
+### 0. Check for a round already in progress
+
+A full round (`codex review` → triage → apply → commit) can take 5–10+ minutes. If another `/peer-review` invocation — a different session, another agent, or the user working the same branch by hand — is mid-round, starting a second review before that round's fixes are committed reviews a moving target and produces stale, duplicate findings (a finding gets reported that the other round already fixed). Reviews must not begin until the previous round is fully committed or concluded. Guard with a lock file scoped to this worktree:
+
+```bash
+GIT_DIR=$(git rev-parse --git-dir)
+LOCK="$GIT_DIR/peer-review.lock"
+if [ -f "$LOCK" ]; then
+  age=$(( $(date +%s) - $(cut -d' ' -f1 "$LOCK") ))
+  if [ "$age" -lt 1200 ]; then
+    cat "$LOCK"   # a live round holds the lock — do not start a new review
+  else
+    rm -f "$LOCK"  # stale (>20min) — previous round crashed; self-heal
+  fi
+fi
+```
+
+- **Lock held (age < 20min):** don't start a review this iteration.
+  - Standalone (`/peer-review`): tell the user a round is already in progress in this worktree (report the lock's age and contents) and stop.
+  - Under `/loop`: skip straight to `ScheduleWakeup(90s)` with reason `"waiting for in-progress peer-review round to finish"`, no review run. This does not count toward the anti-loop no-progress ceiling — you didn't run a review, so there's nothing to have converged or not.
+- **Lock free (or just cleared as stale):** claim it before invoking codex, recording the HEAD you're reviewing against:
+  ```bash
+  echo "$(date +%s) pid=$$ head=$(git rev-parse --short HEAD)" > "$LOCK"
+  ```
+- **Release the lock as the last action of every iteration**, unconditionally, on every exit path — after step 5/6's commit-or-report, or immediately if you exit early (codex failed, nothing to review, lock was held by someone else). `rm -f "$LOCK"` before ending the turn.
+
 ### 1. Determine scope
 
 Pick exactly one mode based on repo state (and any user hint):
@@ -59,7 +85,7 @@ codex review --base "$BASE" 2>&1 | tee /tmp/peer-review-$$.txt
 
 (Or `--uncommitted` per step 1.) Pipe through `tee` so you have a stable transcript to refer to while planning — Codex's output can be long and you don't want to re-read it from your scrollback.
 
-If `codex` exits non-zero, surface the stderr verbatim to the user and stop. Common causes: not logged in (`codex login`), config error, network. Don't try to work around.
+If `codex` exits non-zero, release the lock (`rm -f "$LOCK"`), surface the stderr verbatim to the user, and stop. Common causes: not logged in (`codex login`), config error, network. Don't try to work around.
 
 ### 3. Triage findings — DO NOT edit yet
 
@@ -85,7 +111,7 @@ Codex's review output is free-form prose, usually structured as numbered finding
 | Codex is wrong (you can verify by reading the file) | **skip**, note why |
 | Finding is already fixed in the working tree (Codex reviewed a stale snapshot) | **skip**, note |
 
-Treat Codex's confidence as a hint, not gospel. Read the actual file before applying anything — Codex sometimes hallucinates line numbers, variable names, or "current behavior" that's already different from what's on disk.
+Treat Codex's confidence as a hint, not gospel. Read the actual file before applying anything — Codex sometimes hallucinates line numbers, variable names, or "current behavior" that's already different from what's on disk. Compare current `git rev-parse HEAD` against the `head=` value you recorded in the lock file when you claimed it (step 0) — if it moved, someone else committed while the review ran; some findings are likely already fixed under the "already fixed" rule above, so re-check every finding against the live file, not just the ones that look suspicious.
 
 ### 4. Apply the fixes
 
@@ -106,6 +132,8 @@ Suggested message shape: `Address local Codex review feedback (CON-1234)` or sim
 **Do not push as part of this skill.** Pushing is the user's call — they may want to inspect the diff first, or batch with other work. State explicitly at the end whether you committed and remind them to push when ready.
 
 If zero fixes were applied, do not create an empty commit.
+
+Release the round lock now (`rm -f "$LOCK"`) — the round is committed or concluded, so the next invocation (this session's `/loop` re-entry or another session entirely) is clear to start.
 
 ### 6. Report
 
@@ -141,6 +169,7 @@ State the phase in `ScheduleWakeup.reason`, e.g. `"re-running codex review to ve
 - **Hard ceiling.** Five iterations max under `/loop`. Even if Codex still has findings, stop and report.
 - **Repeated finding.** If the *same* `file:line + summary` finding appears for 3 iterations after you've "fixed" it, stop touching it — your fix isn't what Codex wants. Surface to user.
 - **Cost guard.** Each `codex review` invocation is non-trivial. If the diff hasn't changed since the last review (`git diff $BASE...HEAD` digest matches), don't re-run — exit immediately.
+- **Round lock.** Never launch `codex review` while another round's lock (step 0) is held — wait it out instead of reviewing a moving target. Waiting on the lock doesn't count toward the hard ceiling or the no-progress escalation above; it's not an iteration, it's a pause before one.
 
 ## Common mistakes
 
@@ -152,6 +181,8 @@ State the phase in `ScheduleWakeup.reason`, e.g. `"re-running codex review to ve
 - **Creating empty commits** — if no fixes applied, don't commit. Just report and exit.
 - **Running on `main` without `--uncommitted`** — `codex review` with no scope on `main` will fail or review against itself. Always pick a mode in step 1.
 - **Skipping the summary** — even on a clean review, report it. The user invoked the skill expecting output.
+- **Starting a review without checking the lock** — a round in flight elsewhere means your review's findings go stale mid-run. Check step 0 first, every iteration.
+- **Leaving the lock held on exit** — an orphaned lock blocks every future round in this worktree until it ages out (20min). Release it on every path out of an iteration, not just the happy one.
 
 ## Why this exists
 
