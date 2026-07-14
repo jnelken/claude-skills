@@ -132,7 +132,7 @@ gh api repos/$OWNER/$REPO/issues/$NUM/comments \
 
 The `node_id` (e.g. `IC_kwDO…`) is the GraphQL `subjectId` for `minimizeComment` in step 5. Treat any such comment containing a finding as actionable; skip pure status/noise (usage-limit notices, linkbacks, "Claude finished…" summaries) — don't minimize those.
 
-**If all three surfaces are empty → the requested review is CLEAN.** Skip to step 7 and exit `/loop` — the cycle has converged.
+**If all three surfaces are empty → the requested review is CLEAN.** The cycle has converged: post the summary comment (step 8), then exit `/loop` via step 7.
 
 ### 4. Plan actions — DO NOT execute yet
 
@@ -243,8 +243,8 @@ Under `/loop` dynamic mode: scheduling a wakeup = continue, omitting it = exit.
 |---|---|
 | **Triggered** a review (fresh start, or re-triggered after a push) | `ScheduleWakeup(120s)` — wait for Codex to answer, then poll |
 | **Waiting** (request pending, `LAST_CODEX_AT < LAST_REQUEST_AT`) | `ScheduleWakeup(120s)` — keep polling for the requested review |
-| **Processed** a review that came back **clean** (all three surfaces empty) | omit `ScheduleWakeup` → exit `/loop`, report converged |
-| **Processed** findings but made **no code changes** (reply-only / skipped) | omit `ScheduleWakeup` → exit `/loop`, surface skipped items to user |
+| **Processed** a review that came back **clean** (all three surfaces empty) | post the summary comment (step 8) → omit `ScheduleWakeup` → exit `/loop`, report converged |
+| **Processed** findings but made **no code changes** (reply-only / skipped) | post the summary comment (step 8) → omit `ScheduleWakeup` → exit `/loop`, surface skipped items to user |
 
 State the phase in `ScheduleWakeup.reason`, e.g. `"waiting for requested codex review on abc1234"`, `"poll 2 for pending review"`.
 
@@ -267,12 +267,33 @@ digraph cycle {
   "trigger" -> "wait";
   "wait" -> "state?" [label="on wakeup"];
   "process" -> "clean?";
-  "clean?" -> "exit" [label="yes"];
+  "summary" [shape=box, label="post summary comment\n(step 8)"];
+  "clean?" -> "summary" [label="yes"];
   "clean?" -> "changed?" [label="no (had findings)"];
   "changed?" -> "trigger" [label="yes"];
-  "changed?" -> "exit" [label="no (reply-only/skipped)"];
+  "changed?" -> "summary" [label="no (reply-only/skipped)"];
+  "summary" -> "exit";
 }
 ```
+
+### 8. Post a summary comment on exit — REQUIRED
+
+Both exit paths (converged clean, or reply-only/skipped) end with a top-level PR comment summarizing the whole cycle, so the review trail is visible on the PR itself — not just in the agent transcript. Do this BEFORE ending the loop; the cycle is not complete without it.
+
+Include:
+
+- **Outcome**: converged clean after N rounds (and the HEAD SHA the clean pass ran on), or exited with items skipped/needing human judgment.
+- **Findings addressed**: one line per finding — severity, gist, and the short SHA of the commit that fixed it. Reply-only dispositions (disagreed / already handled) get their one-line reason.
+- **Skipped items**, if any, called out prominently as needing human attention.
+- **CI status** at last push, and any test caveats (e.g. repos where CI runs no test job — say what was run locally).
+- Anything else a human reviewer should know before merging (e.g. a mid-cycle merge from main and what was checked as a result).
+
+```bash
+gh api repos/$OWNER/$REPO/issues/$NUM/comments -f body="## Review cycle summary
+..."
+```
+
+Keep it scannable — headline outcome first, then the per-finding list. This comment is for the humans who review/merge the PR after the loop ends; write it for someone who did not watch the rounds happen.
 
 ## Reply phrasing
 
@@ -304,6 +325,7 @@ Keep replies to one or two sentences. Replies are only posted when no code fix w
 - **Treating a review with no inline threads as automatically clean** — Codex often posts P1/P2 findings only in the review *body* or as a top-level bot comment. Check all three surfaces (step 3) before declaring convergence.
 - **Ignoring reactions when computing `LAST_CODEX_AT`** — at least for an initial review, a clean pass may only show up as a 👍 on the PR description, with no review object, thread, or comment. Miss that in step 2 and a completed clean pass looks like "Codex hasn't answered yet," burning poll ticks until the pending-review timeout fires.
 - **Wrong trigger string** — if Codex never answers, your mention may not match the app's configured trigger (`@codex review` with a space, **not** `@codex-review` with a hyphen, which GitHub treats as a nonexistent user mention). Fix `TRIGGER` in step 1; don't loop forever waiting.
+- **Exiting without the summary comment** — reporting convergence only in the agent transcript leaves no trail on the PR for the humans who merge it. Step 8 is required on both exit paths.
 - **Using this when auto-review is ON** — you'd double-review and waste runs; use [[babysit-pr]] instead.
 - **Amending or force-pushing** — review threads anchor to commits; rewriting breaks them.
 - **Pushing to `main`** — abort if `head == base` or branch is a default branch.
