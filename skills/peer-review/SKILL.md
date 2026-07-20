@@ -211,7 +211,7 @@ Otherwise:
    ```bash
    PR_NUM=$(gh pr view --json number -q .number 2>/dev/null)
    ```
-   Empty/error → no PR yet. Report that the push succeeded and stop; there's nothing to notify (per the user's "if it exists").
+   Empty/error → no PR yet. Report that the push succeeded and stop; there's nothing to notify (per the user's "if it exists"). This isn't a permanent skip, though — if a PR for this branch gets opened later in the *same session* (e.g. the user follows up with "now open a PR"), post the comment at that point. The round already happened before that push; the PR simply didn't exist yet when step 8 first ran.
 
 3. Gather what to report:
    ```bash
@@ -220,9 +220,22 @@ Otherwise:
    ```
    State the model you're running as from your own system context (there's no env var for it — e.g. "Claude Sonnet 5").
 
-4. Post one comment (a fresh comment each time this step runs — not an edit-in-place):
+4. Post one comment (a fresh comment each time this step runs — not an edit-in-place). The body is two parts, in this order: the round-count/model line, then a blank line, then a short prose **summary** — the same substance you'd give the user directly in chat, not the raw step-6 table. Reference the specific fix(es) (file:line or a one-line description of the bug) and the commit SHA(s); if a round found nothing, say so plainly ("No issues found."). If step 8 runs after multiple `/loop` rounds, the summary covers the cumulative set of fixes across *all* rounds since the last push/notify, not just the final one — synthesize from every round's step-6 report you generated this session, not only the last.
+
    ```bash
-   gh pr comment "$PR_NUM" --body "Local peer review: $ROUNDS round(s) of \`codex review\` completed before this push (reviewed with <model>, reasoning effort: $EFFORT)."
+   gh pr comment "$PR_NUM" --body "$(cat <<EOF
+Local peer review: $ROUNDS round(s) of \`codex review\` completed before this push (reviewed with <model>, reasoning effort: $EFFORT).
+
+<summary>
+EOF
+)"
+   ```
+
+   Example:
+   ```
+   Local peer review: 1 round of `codex review` completed before this push (reviewed with Claude Sonnet 5, reasoning effort: high).
+
+   Found one real bug: `groupKey` used `??`, which only falls back on null/undefined — so items with `label: ""` (rather than `null`) all collapsed into a single group and got hidden as spurious duplicates of one another. Fixed by falling back with `||` instead, added a regression test for the empty-string case, and re-ran the full suite clean (committed as `abc1234de`).
    ```
 
 The round counter (`$GIT_DIR/peer-review-rounds`) is cumulative for the life of this worktree and this step never resets it. If the branch gets more local review rounds later (new commits, another `/peer-review` pass, another push), the next comment reports the new running total — reviewers see the full history of local review on this PR, not just the latest session.
@@ -244,7 +257,8 @@ The round counter (`$GIT_DIR/peer-review-rounds`) is cumulative for the life of 
 - **Running on `main` without `--uncommitted`** — `codex review` with no scope on `main` will fail or review against itself. Always pick a scope in step 1.
 - **Letting step 8 push the default branch** — check against the branch detected in step 1, every time; never assume.
 - **Pushing (or notifying) with unresolved P1/P2 findings still outstanding** — step 8's first guard exists specifically to stop this. Skipped-but-unresolved findings need a human's eyes before reviewers get told "this is clean."
-- **Notifying a PR that doesn't exist** — `gh pr view` returning empty means there's genuinely nothing to notify; that's not an error, just report the push and stop.
+- **Notifying a PR that doesn't exist** — `gh pr view` returning empty means there's genuinely nothing to notify yet; that's not an error, just report the push and stop. But don't forget about it permanently — if a PR opens later in the same session, go back and post the comment then.
+- **Posting the round-count line with no substance** — the comment must include a prose summary of what was actually found/fixed (or "No issues found"), not just the round/model/effort line. A bare round-count line makes reviewers ask "okay, but what did it find?"
 - **Resetting the round counter** — it's cumulative on purpose. Don't zero `$GIT_DIR/peer-review-rounds` after a successful notify.
 - **Forgetting `local` when the user wants the old no-push, no-`gh` behavior** — default mode now pushes and comments; `local` is the opt-out, not the other way around.
 - **Skipping the summary** — even on a clean review, report it. The user invoked the skill expecting output.
