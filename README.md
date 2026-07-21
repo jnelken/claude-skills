@@ -17,6 +17,7 @@ Personal Claude Code skills, slash commands, and hooks I author and use across m
 | [`monthly-retro-commits`](skills/monthly-retro-commits) | Export commit-level effort data (TSV, lines-changed sorted) for the retro skill |
 | [`move-diff`](skills/move-diff) | Relocate uncommitted changes to a different branch/worktree |
 | [`peer-review`](skills/peer-review) | Run Codex code review locally before pushing |
+| [`pr-review-gaps`](skills/pr-review-gaps) | Find sswt PRs never posted to `#pr-review`, with a hold-list for deliberately parked ones |
 | [`rebase-after-squash`](skills/rebase-after-squash) | Resolve rebase-after-squash-merge conflicts cleanly |
 | [`rum-review`](skills/rum-review) | Query Datadog RUM data, synthesize findings into categorized issues |
 | [`screenshot-pr`](skills/screenshot-pr) | Capture one signature screenshot from the deploy preview, embed in PR description |
