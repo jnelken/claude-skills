@@ -55,11 +55,14 @@ a periodic/ad-hoc audit and needs a confirmation step every time.
    bulk-read — a plain `slack_read_channel` history pull has a lookback horizon and will miss
    an older post. Use:
    ```
-   slack_search_public query: "pull/<number>" in:#pr-review
+   slack_search_public query: "<repo-short-name>/pull/<number>" in:#pr-review
    ```
-   Match on the **PR number/URL fragment**, never the title — the same PR shows up in the
-   channel under different message text across posts (e.g. api#1068 was announced twice with
-   two different titles). A hit means it was already posted: append
+   e.g. `"api/pull/1107" in:#pr-review` — **include the repo short name in the query, not just
+   the bare `pull/<number>`.** PR numbers collide across repos (api#1107 and woodrow#1107 are
+   different PRs); searching `"pull/1107"` alone matched the wrong repo's PR during this
+   skill's own dry run. Match on the **PR number/URL fragment**, never the title — the same PR
+   shows up in the channel under different message text across posts (e.g. api#1068 was
+   announced twice with two different titles). A hit means it was already posted: append
    `{"url","repo","pr","postedAt"}` (postedAt = the message's timestamp) to
    `pr-review-posted.jsonl` and drop the candidate from the gap list.
 
@@ -87,6 +90,9 @@ a periodic/ad-hoc audit and needs a confirmation step every time.
 
 - Matching posted/held state by title instead of **repo + PR number** (or URL) — titles change
   between posts of the same PR and will cause both false negatives and false positives.
+- Searching Slack for a bare `pull/<number>` without the repo name — PR numbers collide across
+  repos (api and woodrow both have a PR #1107), so an unscoped search can match the wrong PR
+  entirely. Always include the repo short name in the query.
 - Relying on `slack_read_channel` bulk reads to decide "already posted" — no lookback
   guarantee. Always use `slack_search_public` per PR for the backfill check.
 - Posting without the Step 8 confirmation — this skill's whole point is a human-gated
