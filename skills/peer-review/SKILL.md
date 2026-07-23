@@ -91,11 +91,26 @@ If both committed-branch-changes AND uncommitted changes exist, ask the user whi
 
 ### 2. Run the review
 
+**First round on a branch: build a focus prompt before invoking Codex.** A bare `codex review` reports its top-confidence findings, not an exhaustive sweep — each new diff re-rolls its attention, so on a cross-cutting change it peels one layer per round and a review that should converge in 1–2 rounds takes 5+. `codex review` accepts custom instructions as a positional `[PROMPT]` argument; use it. Before the first round:
+
+1. **Enumerate the change's interaction matrix from the diff.** Which axes does it cut across? Typical axes: data types / value formats (enum, array, date, percent…), component or editor variants that share the behavior, permission/visibility states (unauthorized, masked, loading, read-only), and host contexts (inside buttons, tables, dashboards). A change that mirrors display state or adds a new affordance to existing values usually spans several.
+2. **Self-check the predictable cells yourself, first** — especially the security-shaped ones: *does the new affordance respect value masking / authorization in every state?* Fix what you find before spending a review round discovering it.
+3. **Persist the matrix as a focus prompt** so every `/loop` round reuses it:
+   ```bash
+   echo "verify copy-vs-display parity for every data type; check masked/unauthorized/loading/read-only states; check all editor variants and host contexts" > "$GIT_DIR/peer-review-focus"
+   ```
+   (That's an example — write the actual axes you enumerated.) Like the rounds file, this persists across iterations and is never cleaned up per-round.
+
+Then run every round with the focus appended:
+
 ```bash
-codex review --base "$BASE" 2>&1 | tee /tmp/peer-review-$$.txt
+FOCUS=$(cat "$GIT_DIR/peer-review-focus" 2>/dev/null)
+codex review --base "$BASE" ${FOCUS:+"Focus especially on: $FOCUS. Also report anything else you find."} 2>&1 | tee /tmp/peer-review-$$.txt
 ```
 
 (Or `--uncommitted` per step 1.) Pipe through `tee` so you have a stable transcript to refer to while planning — Codex's output can be long and you don't want to re-read it from your scrollback.
+
+**Optional — parallel lenses for unusually wide diffs.** If the matrix spans 3+ axes, round 1 may run 2–3 *concurrent* `codex review` invocations, each with a different lens prompt (e.g. markup/a11y; permission and masking leaks; formatting/display parity), then triage the **union** of findings in step 3. This still counts as one round — one lock, one triage, one apply pass, one commit, one increment of the rounds file. It trades tokens for wall-clock rounds; use it when the alternative is predictably serial rounds each finding a different lens's issues.
 
 If `codex` exits non-zero, release the lock (`rm -f "$LOCK"`), surface the stderr verbatim to the user, and stop. Common causes: not logged in (`codex login`), config error, network. Don't try to work around.
 
@@ -249,6 +264,7 @@ The round counter (`$GIT_DIR/peer-review-rounds`) is cumulative for the life of 
 
 ## Common mistakes
 
+- **Running bare generic rounds on a cross-cutting change** — without a focus prompt, Codex surfaces one layer per round and burns the loop ceiling on findings that were predictable cells of the change's interaction matrix (data type × variant × permission state). Enumerate the matrix, self-check the security-shaped cells, and seed every round with the focus prompt (step 2).
 - **Auto-applying every finding** — Codex's job is to be thorough; yours is to be selective. Skipping is fine and often correct.
 - **Editing during step 3** — step 3 is planning only. Edits in step 4. Otherwise you'll forget which findings were applied vs. skipped when you write the summary.
 - **Trusting Codex's line numbers blindly** — read the file first. Codex reviews diffs and can be off by a few lines or refer to code that was moved/deleted.

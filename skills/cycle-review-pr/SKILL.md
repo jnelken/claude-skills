@@ -231,6 +231,8 @@ gh api repos/$OWNER/$REPO/issues/$NUM/comments -f body="$TRIGGER"   # $TRIGGER f
 LAST_REQUEST_AT=$(TZ=UTC0 git log -1 --date=iso-strict-local --format=%cd HEAD)  # UTC; or capture the comment's created_at directly
 ```
 
+**Seed cross-cutting changes with a focus suffix.** The `@codex review` mention accepts extra instructions after it, and a bare request reports Codex's top-confidence findings, not an exhaustive sweep — on a wide change it peels one layer per round. Before the *first* trigger on a PR whose diff cuts across multiple axes (data types/formats × component variants × permission/masking states × host contexts), enumerate those axes from the diff, self-check the security-shaped cells yourself (does the new affordance respect value masking/authorization?), then post the trigger with the matrix appended, e.g. `body="$TRIGGER — focus especially on copy-vs-display parity for every data type, and masked/unauthorized/loading/read-only states; also report anything else"`. Reuse the same suffix on every re-trigger for that PR. See [[peer-review]] step 2 for the full matrix-enumeration guidance.
+
 This is also the path taken on a **fresh start** (step 2 "Trigger" case): no findings to address, no request yet → post `$TRIGGER` to kick off the first review, then wait.
 
 If this iteration made **no code changes** (all findings were reply-only or skipped), do **not** re-trigger — there's nothing new to review. Go to step 7 and exit, surfacing the skipped items to the user.
