@@ -91,7 +91,7 @@ If both committed-branch-changes AND uncommitted changes exist, ask the user whi
 
 ### 2. Run the review
 
-**First round on a branch: build a focus prompt before invoking Codex.** A bare `codex review` reports its top-confidence findings, not an exhaustive sweep — each new diff re-rolls its attention, so on a cross-cutting change it peels one layer per round and a review that should converge in 1–2 rounds takes 5+. `codex review` accepts custom instructions as a positional `[PROMPT]` argument; use it. Before the first round:
+**First round on a branch: build a focus prompt before invoking Codex.** A bare `codex review` reports its top-confidence findings, not an exhaustive sweep — each new diff re-rolls its attention, so on a cross-cutting change it peels one layer per round and a review that should converge in 1–2 rounds takes 5+. `codex review` accepts custom instructions as a positional `[PROMPT]` argument; use it. **Gotcha: `--base <branch>` cannot be combined with `[PROMPT]`** — despite the usage string advertising both, the CLI errors out (`the argument '--base <BRANCH>' cannot be used with '[PROMPT]'`, verified on codex 2026-07). When passing a focus prompt, drop the `--base` flag and state the diff scope inside the prompt instead ("Review the changes on this branch relative to the merge-base with origin/<base>. …") — verified to scope the diff identically to `--base`. `--uncommitted` composes with `[PROMPT]` normally. Before the first round:
 
 1. **Enumerate the change's interaction matrix from the diff.** Which axes does it cut across? Typical axes: data types / value formats (enum, array, date, percent…), component or editor variants that share the behavior, permission/visibility states (unauthorized, masked, loading, read-only), and host contexts (inside buttons, tables, dashboards). A change that mirrors display state or adds a new affordance to existing values usually spans several.
 2. **Self-check the predictable cells yourself, first** — especially the security-shaped ones: *does the new affordance respect value masking / authorization in every state?* Fix what you find before spending a review round discovering it.
@@ -101,14 +101,37 @@ If both committed-branch-changes AND uncommitted changes exist, ask the user whi
    ```
    (That's an example — write the actual axes you enumerated.) Like the rounds file, this persists across iterations and is never cleaned up per-round.
 
-Then run every round with the focus appended:
+Then run every round with the focus appended — remember `--base` and a prompt are mutually exclusive, so the base goes inside the prompt:
 
 ```bash
 FOCUS=$(cat "$GIT_DIR/peer-review-focus" 2>/dev/null)
-codex review --base "$BASE" ${FOCUS:+"Focus especially on: $FOCUS. Also report anything else you find."} 2>&1 | tee /tmp/peer-review-$$.txt
+if [ -n "$FOCUS" ]; then
+  codex review "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." 2>&1 | tee /tmp/peer-review-$$.txt
+else
+  codex review --base "$BASE" 2>&1 | tee /tmp/peer-review-$$.txt
+fi
 ```
 
 (Or `--uncommitted` per step 1.) Pipe through `tee` so you have a stable transcript to refer to while planning — Codex's output can be long and you don't want to re-read it from your scrollback.
+
+**Gotcha — the Bash tool kills long `codex review` calls at ~2 minutes regardless of timeout settings.** Leaving the timeout at default, passing it explicitly (even up to 590000ms), or adding `run_in_background: true` does not protect the call — the tool invocation itself gets killed at the ~2-minute mark, even though the underlying `codex` process would otherwise keep running to completion. Reconfirmed twice in the same session on a larger diff, so don't re-litigate it by trying `timeout`/`run_in_background` again — go straight to detach-and-poll:
+
+```bash
+# Same --base/[PROMPT] exclusivity applies here: with a focus prompt, name
+# the base inside the prompt; without one, use --base.
+if [ -n "$FOCUS" ]; then
+  nohup codex review "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." > /tmp/peer-review-$$.txt 2>&1 &
+else
+  nohup codex review --base "$BASE" > /tmp/peer-review-$$.txt 2>&1 &
+fi
+CODEX_PID=$!
+```
+
+Then wait on it with the Monitor tool, not a blocking Bash polling loop — that loop also gets killed at 2 minutes even though the detached process underneath survives:
+```bash
+until ! ps -p $CODEX_PID >/dev/null 2>&1; do sleep 5; done; echo done
+```
+Once Monitor reports completion, read `/tmp/peer-review-$$.txt` for the review output and continue at step 3.
 
 **Optional — parallel lenses for unusually wide diffs.** If the matrix spans 3+ axes, round 1 may run 2–3 *concurrent* `codex review` invocations, each with a different lens prompt (e.g. markup/a11y; permission and masking leaks; formatting/display parity), then triage the **union** of findings in step 3. This still counts as one round — one lock, one triage, one apply pass, one commit, one increment of the rounds file. It trades tokens for wall-clock rounds; use it when the alternative is predictably serial rounds each finding a different lens's issues.
 
